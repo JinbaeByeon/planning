@@ -2,7 +2,6 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import GroupPage from './pages/GroupPage';
-import './App.css';
 
 function App() {
   const isAuthenticated = !!localStorage.getItem('travel_user_id');
