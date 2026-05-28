@@ -1,5 +1,4 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
 
 const DashboardPage: React.FC = () => {
   const userId = localStorage.getItem('travel_user_id');
