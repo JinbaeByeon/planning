@@ -13,7 +13,8 @@ import {
   DialogTrigger 
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
-import { PlusCircle, LogOut, MapPin, Search, Calendar, ChevronRight } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { PlusCircle, LogOut, MapPin, Search, Calendar, ChevronRight, Copy } from 'lucide-react';
 import { groupService } from '@/services/groupService';
 import type { TravelGroup } from '@/services/groupService';
 
@@ -195,9 +196,28 @@ const DashboardPage: React.FC = () => {
                           <Calendar className="h-5 w-5 text-primary" />
                         </div>
                         <div>
-                          <h3 className="font-semibold">{group.name}</h3>
-                          <p className="text-sm text-muted-foreground">
+                          <h3 className="font-semibold flex items-center gap-2">
+                            {group.name}
+                            {group.status === 'confirmed' ? (
+                              <Badge className="bg-green-500 hover:bg-green-600 text-[10px] py-0 font-medium h-4">확정됨</Badge>
+                            ) : (
+                              <Badge variant="secondary" className="text-[10px] py-0 font-medium h-4">조율 중</Badge>
+                            )}
+                          </h3>
+                          <p className="text-sm text-muted-foreground mt-1 flex items-center gap-1.5">
                             초대 코드: <span className="font-mono font-medium">{group.invite_code}</span>
+                            <button
+                              type="button"
+                              className="text-muted-foreground hover:text-primary transition-colors p-1 rounded-md hover:bg-muted"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                navigator.clipboard.writeText(group.invite_code);
+                                alert('초대 코드가 복사되었습니다: ' + group.invite_code);
+                              }}
+                              title="초대 코드 복사"
+                            >
+                              <Copy className="h-3.5 w-3.5" />
+                            </button>
                           </p>
                         </div>
                       </div>
