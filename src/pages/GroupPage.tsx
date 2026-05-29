@@ -40,10 +40,13 @@ import {
   CircleCheck,
   ChevronRight,
   XCircle,
-  Trash2
+  Trash2,
+  GripVertical
 } from 'lucide-react';
+import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
+import type { DropResult } from '@hello-pangea/dnd';
 import { groupService } from '@/services/groupService';
-import type { TravelGroup } from '@/services/groupService';
+import type { TravelGroup, ItineraryItem } from '@/services/groupService';
 import { format, parseISO } from 'date-fns';
 import { ko } from 'date-fns/locale';
 import { cn } from '@/lib/utils';
@@ -70,6 +73,15 @@ const GroupPage: React.FC = () => {
   const [newPlaceDesc, setNewPlaceDesc] = useState('');
   const [isAddingPlace, setIsAddingPlace] = useState(false);
 
+  // 일정표(Itinerary) 상태
+  const [itinerary, setItinerary] = useState<ItineraryItem[]>([]);
+  const [newItinTime, setNewItinTime] = useState('');
+  const [newItinPlaceId, setNewItinPlaceId] = useState('custom');
+  const [newItinCustomPlace, setNewItinCustomPlace] = useState('');
+  const [newItinMemo, setNewItinMemo] = useState('');
+  const [isAddingItin, setIsAddingItin] = useState(false);
+  const [showInlineAdd, setShowInlineAdd] = useState(false);
+
   // 확정 관련 상태
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [isCreator, setIsCreator] = useState(false);
@@ -91,17 +103,19 @@ const GroupPage: React.FC = () => {
     if (!groupId || !userId) return;
     setLoading(true);
     
-    const [groupData, memberData, availabilityData, placeData] = await Promise.all([
+    const [groupData, memberData, availabilityData, placeData, itineraryData] = await Promise.all([
       groupService.getGroupById(groupId),
       groupService.getGroupMembers(groupId),
       groupService.getGroupAvailability(groupId),
-      groupService.getGroupPlaces(groupId)
+      groupService.getGroupPlaces(groupId),
+      groupService.getItinerary(groupId)
     ]);
 
     setGroup(groupData);
     setMembers(memberData);
     setAllAvailability(availabilityData);
     setPlaces(placeData);
+    setItinerary(itineraryData);
     setIsCreator(groupData?.created_by === userId);
 
     // 내 선택 날짜 초기화 (타입별 분리)
@@ -214,6 +228,84 @@ const GroupPage: React.FC = () => {
     }
   };
 
+  const handleAddItinerary = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!groupId || !userId || !newItinTime.trim()) return;
+    if (newItinPlaceId === 'custom' && !newItinCustomPlace.trim()) return;
+
+    setIsAddingItin(true);
+    const placeIdToSubmit = newItinPlaceId === 'custom' ? undefined : newItinPlaceId;
+    const customPlaceToSubmit = newItinPlaceId === 'custom' ? newItinCustomPlace : undefined;
+
+    const result = await groupService.addItineraryItem(
+      groupId, 
+      userId, 
+      newItinTime, 
+      placeIdToSubmit, 
+      customPlaceToSubmit, 
+      newItinMemo
+    );
+    setIsAddingItin(false);
+
+    if (result.success) {
+      setNewItinTime('');
+      setNewItinPlaceId('custom');
+      setNewItinCustomPlace('');
+      setNewItinMemo('');
+      setShowInlineAdd(false);
+      const itineraryData = await groupService.getItinerary(groupId);
+      setItinerary(itineraryData);
+    } else {
+      alert(result.message);
+    }
+  };
+
+  const handleDeleteItinerary = async (itemId: string) => {
+    if (!confirm('일정을 삭제하시겠습니까?')) return;
+    const result = await groupService.deleteItineraryItem(itemId);
+    if (result.success) {
+      const itineraryData = await groupService.getItinerary(groupId!);
+      setItinerary(itineraryData);
+    } else {
+      alert(result.message);
+    }
+  };
+
+  const handleDragEnd = async (result: DropResult) => {
+    if (!result.destination) return;
+
+    const items = Array.from(itinerary);
+    const [reorderedItem] = items.splice(result.source.index, 1);
+    items.splice(result.destination.index, 0, reorderedItem);
+
+    // 낙관적 UI 업데이트
+    setItinerary(items);
+
+    // 시간 재계산 (간단히 30분 간격으로 재배치하는 예시)
+    if (items.length > 0) {
+      const baseTime = items[0].time; // 첫 번째 항목 시간 기준
+      const [hours, minutes] = baseTime.split(':').map(Number);
+      
+      const updatedItems = items.map((item, index) => {
+        const totalMinutes = hours * 60 + minutes + (index * 30);
+        const newHours = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
+        const newMinutes = String(totalMinutes % 60).padStart(2, '0');
+        return { ...item, time: `${newHours}:${newMinutes}` };
+      });
+      
+      setItinerary(updatedItems);
+
+      // 서버 반영
+      const res = await groupService.updateItineraryTimes(
+        updatedItems.map(item => ({ id: item.id, time: item.time }))
+      );
+      
+      if (!res.success) {
+        alert('순서 저장에 실패했습니다. 페이지를 새로고침해주세요.');
+      }
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -288,8 +380,14 @@ const GroupPage: React.FC = () => {
         <div className="grid gap-8 lg:grid-cols-4">
           {/* Main Content Area */}
           <div className="lg:col-span-3 space-y-6">
-            <Tabs defaultValue="dates" className="w-full">
-              <TabsList className="grid w-full grid-cols-2 mb-8">
+            <Tabs defaultValue={isConfirmed ? "itinerary" : "dates"} className="w-full">
+              <TabsList className={cn("grid w-full mb-8", isConfirmed ? "grid-cols-3" : "grid-cols-2")}>
+                {isConfirmed && (
+                  <TabsTrigger value="itinerary" className="flex gap-2">
+                    <CalendarIcon className="h-4 w-4" />
+                    일정표
+                  </TabsTrigger>
+                )}
                 <TabsTrigger value="dates" className="flex gap-2">
                   <CalendarIcon className="h-4 w-4" />
                   날짜 {isConfirmed ? '확인' : '조율'}
@@ -300,6 +398,184 @@ const GroupPage: React.FC = () => {
                 </TabsTrigger>
               </TabsList>
               
+              {isConfirmed && (
+                <TabsContent value="itinerary" className="space-y-6">
+                  <div className="space-y-4 pt-4">
+                    <h3 className="font-semibold text-lg flex items-center gap-2">
+                      <CalendarIcon className="h-5 w-5 text-primary" />
+                      타임라인
+                    </h3>
+                    
+                    <div className="relative border-l-2 border-muted ml-4 pl-6 space-y-8 py-4">
+                      {itinerary.length > 0 && (
+                        <DragDropContext onDragEnd={handleDragEnd}>
+                          <Droppable droppableId="itinerary-list">
+                            {(provided) => (
+                              <div 
+                                className="space-y-8"
+                                {...provided.droppableProps}
+                                ref={provided.innerRef}
+                              >
+                                {itinerary.map((item, index) => {
+                                  const canDelete = item.user_id === userId || isCreator;
+                                  const placeName = item.place_id ? item.group_places?.name : item.custom_place;
+
+                                  return (
+                                    <Draggable key={item.id} draggableId={item.id} index={index} isDragDisabled={!isCreator}>
+                                      {(provided) => (
+                                        <div 
+                                          className="relative group flex items-start gap-4"
+                                          ref={provided.innerRef}
+                                          {...provided.draggableProps}
+                                        >
+                                          {/* 드래그 핸들 (방장만 표시) */}
+                                          {isCreator && (
+                                            <div 
+                                              {...provided.dragHandleProps}
+                                              className="absolute -left-12 top-6 text-muted-foreground hover:text-primary cursor-grab active:cursor-grabbing p-1 bg-background rounded-md z-10"
+                                            >
+                                              <GripVertical className="h-4 w-4" />
+                                            </div>
+                                          )}
+
+                                          {/* 타임라인 점 */}
+                                          <div className="absolute w-4 h-4 bg-background border-2 border-primary rounded-full -left-[33px] top-7" />
+                                          
+                                          <Card className="flex-1 hover:border-primary/50 transition-colors bg-background">
+                                            <CardContent className="p-4 sm:p-6 relative">
+                                              {canDelete && (
+                                                <Button
+                                                  variant="ghost"
+                                                  size="icon"
+                                                  className="absolute top-2 right-2 h-7 w-7 text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                                                  onClick={() => handleDeleteItinerary(item.id)}
+                                                >
+                                                  <Trash2 className="h-4 w-4" />
+                                                </Button>
+                                              )}
+                                              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-6 mb-2">
+                                                <span className="text-xl font-bold text-primary">{item.time}</span>
+                                                <h4 className="text-lg font-semibold flex items-center gap-2">
+                                                  <MapPin className="h-4 w-4 text-muted-foreground" />
+                                                  {placeName}
+                                                </h4>
+                                              </div>
+                                              {item.memo && (
+                                                <p className="text-sm text-muted-foreground mt-2 bg-muted/50 p-3 rounded-md">
+                                                  {item.memo}
+                                                </p>
+                                              )}
+                                              <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
+                                                <span className="flex items-center gap-1">
+                                                  등록: {item.users?.nickname}
+                                                </span>
+                                              </div>
+                                            </CardContent>
+                                          </Card>
+                                        </div>
+                                      )}
+                                    </Draggable>
+                                  );
+                                })}
+                                {provided.placeholder}
+                              </div>
+                            )}
+                          </Droppable>
+                        </DragDropContext>
+                      )}
+
+                      {/* 인라인 추가 폼 또는 버튼 */}
+                      <div className="relative pt-4">
+                        <div className="absolute w-4 h-4 bg-background border-2 border-muted rounded-full -left-[33px] top-11" />
+                        
+                        {showInlineAdd ? (
+                          <Card className="border-primary shadow-sm bg-background">
+                            <CardHeader className="pb-3">
+                              <CardTitle className="text-base">새 일정 추가</CardTitle>
+                            </CardHeader>
+                            <CardContent>
+                              <form onSubmit={handleAddItinerary} className="grid gap-4">
+                                <div className="grid gap-4 sm:grid-cols-2">
+                                  <div className="grid gap-2">
+                                    <Label htmlFor="time">시간</Label>
+                                    <Input
+                                      id="time"
+                                      type="time"
+                                      value={newItinTime}
+                                      onChange={(e) => setNewItinTime(e.target.value)}
+                                      required
+                                    />
+                                  </div>
+                                  <div className="grid gap-2">
+                                    <Label htmlFor="place">장소</Label>
+                                    <select
+                                      id="place"
+                                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                                      value={newItinPlaceId}
+                                      onChange={(e) => setNewItinPlaceId(e.target.value)}
+                                    >
+                                      <option value="custom">직접 입력...</option>
+                                      {places.filter(p => p.is_confirmed).map(p => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                      ))}
+                                    </select>
+                                    {newItinPlaceId === 'custom' && (
+                                      <Input
+                                        placeholder="장소명 입력"
+                                        value={newItinCustomPlace}
+                                        onChange={(e) => setNewItinCustomPlace(e.target.value)}
+                                        className="mt-2"
+                                        required
+                                      />
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="grid gap-2">
+                                  <Label htmlFor="memo">메모 (선택사항)</Label>
+                                  <Input
+                                    id="memo"
+                                    placeholder="간단한 메모를 남겨주세요."
+                                    value={newItinMemo}
+                                    onChange={(e) => setNewItinMemo(e.target.value)}
+                                  />
+                                </div>
+                                <div className="flex justify-end gap-2 mt-2">
+                                  <Button 
+                                    type="button" 
+                                    variant="ghost" 
+                                    onClick={() => setShowInlineAdd(false)}
+                                  >
+                                    취소
+                                  </Button>
+                                  <Button type="submit" disabled={isAddingItin || !newItinTime}>
+                                    {isAddingItin ? <Loader2 className="h-4 w-4 animate-spin" /> : '저장'}
+                                  </Button>
+                                </div>
+                              </form>
+                            </CardContent>
+                          </Card>
+                        ) : (
+                          <Button 
+                            variant="outline" 
+                            className="w-full h-16 border-dashed text-muted-foreground hover:text-primary hover:border-primary gap-2"
+                            onClick={() => setShowInlineAdd(true)}
+                          >
+                            <PlusCircle className="h-5 w-5" />
+                            새 일정 추가
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    
+                    {itinerary.length === 0 && !showInlineAdd && (
+                      <p className="text-center py-8 text-muted-foreground text-sm">
+                        아직 등록된 일정이 없습니다. <br/>'+ 새 일정 추가' 버튼을 눌러 첫 번째 일정을 추가해보세요!
+                      </p>
+                    )}
+                  </div>
+                </TabsContent>
+              )}
+
               <TabsContent value="dates" className="space-y-6">
                 {isConfirmed ? (
                   <Card className="py-12 flex flex-col items-center justify-center text-center space-y-4">

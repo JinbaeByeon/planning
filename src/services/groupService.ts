@@ -10,6 +10,20 @@ export interface TravelGroup {
   confirmed_date?: string;
 }
 
+export interface ItineraryItem {
+  id: string;
+  group_id: string;
+  user_id: string;
+  day_number: number;
+  time: string;
+  place_id?: string;
+  custom_place?: string;
+  memo?: string;
+  created_at: string;
+  users?: { nickname: string };
+  group_places?: { name: string; description: string };
+}
+
 export const groupService = {
   /**
    * 새로운 여행 그룹을 생성합니다.
@@ -403,6 +417,106 @@ export const groupService = {
     } catch (error: any) {
       console.error('Error finalizing group:', error);
       return { success: false, message: error.message };
+    }
+  },
+
+  /**
+   * 세부 일정(Itinerary) 항목을 추가합니다.
+   */
+  async addItineraryItem(
+    groupId: string, 
+    userId: string, 
+    time: string, 
+    placeId?: string, 
+    customPlace?: string, 
+    memo?: string
+  ): Promise<{ success: boolean; message: string }> {
+    try {
+      const { error } = await supabase
+        .from('group_itinerary')
+        .insert([{ 
+          group_id: groupId, 
+          user_id: userId, 
+          time, 
+          place_id: placeId || null, 
+          custom_place: customPlace || null, 
+          memo: memo || null 
+        }]);
+
+      if (error) throw error;
+      return { success: true, message: '일정이 추가되었습니다.' };
+    } catch (error: any) {
+      console.error('Error adding itinerary item:', error);
+      return { success: false, message: `일정 추가 중 오류가 발생했습니다: ${error.message}` };
+    }
+  },
+
+  /**
+   * 그룹의 세부 일정표를 시간순으로 가져옵니다.
+   */
+  async getItinerary(groupId: string): Promise<ItineraryItem[]> {
+    try {
+      const { data, error } = await supabase
+        .from('group_itinerary')
+        .select(`
+          *,
+          users (nickname),
+          group_places (name, description)
+        `)
+        .eq('group_id', groupId)
+        .order('time', { ascending: true });
+
+      if (error) throw error;
+      return data as ItineraryItem[];
+    } catch (error) {
+      console.error('Error getting itinerary:', error);
+      return [];
+    }
+  },
+
+  /**
+   * 세부 일정 항목을 삭제합니다.
+   */
+  async deleteItineraryItem(itemId: string): Promise<{ success: boolean; message: string }> {
+    try {
+      const { error } = await supabase
+        .from('group_itinerary')
+        .delete()
+        .eq('id', itemId);
+
+      if (error) throw error;
+      return { success: true, message: '일정이 삭제되었습니다.' };
+    } catch (error: any) {
+      console.error('Error deleting itinerary item:', error);
+      return { success: false, message: `일정 삭제 중 오류가 발생했습니다: ${error.message}` };
+    }
+  },
+
+  /**
+   * 드래그 앤 드롭으로 재정렬된 여러 항목의 시간을 일괄 업데이트합니다.
+   */
+  async updateItineraryTimes(items: { id: string; time: string }[]): Promise<{ success: boolean; message: string }> {
+    try {
+      // Supabase-js v2에서는 다중 행 업데이트 시 upsert 활용 (id가 PK여야 함)
+      // group_itinerary의 PK는 id입니다. 기존 값들을 유지하려면 다른 컬럼들도 함께 전달하거나 별도 처리해야 하지만,
+      // 가장 간단한 방법은 Promise.all로 개별 업데이트 하는 것입니다. (항목 수가 많지 않을 것으로 예상)
+      
+      const updatePromises = items.map(item => 
+        supabase
+          .from('group_itinerary')
+          .update({ time: item.time })
+          .eq('id', item.id)
+      );
+
+      const results = await Promise.all(updatePromises);
+      
+      const hasError = results.some(res => res.error);
+      if (hasError) throw new Error('일부 항목 업데이트 실패');
+
+      return { success: true, message: '일정 순서가 저장되었습니다.' };
+    } catch (error: any) {
+      console.error('Error updating itinerary times:', error);
+      return { success: false, message: `일정 순서 저장 중 오류가 발생했습니다: ${error.message}` };
     }
   }
 };
