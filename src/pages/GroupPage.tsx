@@ -50,6 +50,15 @@ import type { TravelGroup, ItineraryItem } from '@/services/groupService';
 import { format, parseISO } from 'date-fns';
 import { ko } from 'date-fns/locale';
 import { cn } from '@/lib/utils';
+const adjustTimeString = (timeStr: string, offsetMinutes: number): string => {
+  if (!timeStr) return '09:00';
+  const [h, m] = timeStr.split(':').map(Number);
+  const total = h * 60 + m;
+  const newTotal = (total + offsetMinutes + 24 * 60) % (24 * 60); // 24시간 순환
+  const newH = String(Math.floor(newTotal / 60)).padStart(2, '0');
+  const newM = String(newTotal % 60).padStart(2, '0');
+  return `${newH}:${newM}`;
+};
 
 const GroupPage: React.FC = () => {
   const { groupId } = useParams<{ groupId: string }>();
@@ -75,12 +84,12 @@ const GroupPage: React.FC = () => {
 
   // 일정표(Itinerary) 상태
   const [itinerary, setItinerary] = useState<ItineraryItem[]>([]);
-  const [newItinTime, setNewItinTime] = useState('');
-  const [newItinPlaceId, setNewItinPlaceId] = useState('custom');
-  const [newItinCustomPlace, setNewItinCustomPlace] = useState('');
-  const [newItinMemo, setNewItinMemo] = useState('');
   const [isAddingItin, setIsAddingItin] = useState(false);
-  const [showInlineAdd, setShowInlineAdd] = useState(false);
+  const [editingItemId, setEditingItemId] = useState<string>('');
+  const [editingField, setEditingField] = useState<'time' | 'place' | 'memo' | null>(null);
+  const [editItinTime, setEditItinTime] = useState('');
+  const [editItinCustomPlace, setEditItinCustomPlace] = useState('');
+  const [editItinMemo, setEditItinMemo] = useState('');
 
   // 확정 관련 상태
   const [isFinalizing, setIsFinalizing] = useState(false);
@@ -228,35 +237,111 @@ const GroupPage: React.FC = () => {
     }
   };
 
-  const handleAddItinerary = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!groupId || !userId || !newItinTime.trim()) return;
-    if (newItinPlaceId === 'custom' && !newItinCustomPlace.trim()) return;
+  const handleQuickAddItinerary = async () => {
+    if (!groupId || !userId) return;
 
     setIsAddingItin(true);
-    const placeIdToSubmit = newItinPlaceId === 'custom' ? undefined : newItinPlaceId;
-    const customPlaceToSubmit = newItinPlaceId === 'custom' ? newItinCustomPlace : undefined;
+    let nextTime = '09:00';
+    const dayItems = itinerary; // 단일 일차 형태이므로 기존 전체 리스트 활용
+    if (dayItems.length > 0) {
+      const lastItem = dayItems[dayItems.length - 1];
+      const [h, m] = lastItem.time.split(':').map(Number);
+      const newTotal = Math.min((h * 60 + m) + 60, 24 * 60 - 1); // 1시간 뒤
+      const newH = String(Math.floor(newTotal / 60)).padStart(2, '0');
+      const newM = String(newTotal % 60).padStart(2, '0');
+      nextTime = `${newH}:${newM}`;
+    }
 
     const result = await groupService.addItineraryItem(
-      groupId, 
-      userId, 
-      newItinTime, 
-      placeIdToSubmit, 
-      customPlaceToSubmit, 
-      newItinMemo
+      groupId,
+      userId,
+      nextTime,
+      undefined,
+      '새로운 할 일',
+      undefined,
+      1
     );
     setIsAddingItin(false);
 
-    if (result.success) {
-      setNewItinTime('');
-      setNewItinPlaceId('custom');
-      setNewItinCustomPlace('');
-      setNewItinMemo('');
-      setShowInlineAdd(false);
+    if (result.success && result.data) {
       const itineraryData = await groupService.getItinerary(groupId);
       setItinerary(itineraryData);
+      
+      const newItem = itineraryData.find(item => item.id === result.data!.id) || result.data;
+      
+      // 즉시 새로 생성된 일정의 'place' 필드 에디트 모드 가동!
+      setEditingItemId(newItem.id);
+      setEditingField('place');
+      setEditItinCustomPlace('새로운 할 일');
     } else {
-      alert(result.message);
+      alert(result.message || '일정 추가 중 오류가 발생했습니다.');
+    }
+  };
+
+  const saveField = async (item: ItineraryItem, field: 'time' | 'place' | 'memo', value: string) => {
+    const originalText = field === 'place' 
+      ? (item.place_id ? item.group_places?.name : item.custom_place) 
+      : (field === 'memo' ? item.memo : item.time);
+      
+    let finalValue = value;
+    if (field === 'place') {
+      finalValue = value.trim() === '' ? (originalText || '새로운 할 일') : value.trim();
+    } else if (field === 'time') {
+      finalValue = !value ? (originalText || '09:00') : value;
+    } else if (field === 'memo') {
+      finalValue = value.trim() === '' ? '' : value.trim();
+    }
+
+    const isSame = (originalText || '') === finalValue;
+
+    if (isSame) {
+      setEditingItemId('');
+      setEditingField(null);
+      return;
+    }
+
+    const timeToSubmit = field === 'time' ? finalValue : item.time;
+    let placeIdToSubmit = item.place_id;
+    let customPlaceToSubmit = item.custom_place;
+    
+    if (field === 'place') {
+      placeIdToSubmit = undefined;
+      customPlaceToSubmit = finalValue;
+    }
+    
+    const memoToSubmit = field === 'memo' ? (finalValue || undefined) : item.memo;
+
+    // 즉시 UI 낙관적 업데이트
+    const updatedItinerary = itinerary.map(itin => {
+      if (itin.id === item.id) {
+        return {
+          ...itin,
+          time: timeToSubmit,
+          place_id: placeIdToSubmit,
+          custom_place: customPlaceToSubmit,
+          memo: memoToSubmit,
+        };
+      }
+      return itin;
+    });
+    
+    setItinerary(updatedItinerary.sort((a, b) => a.time.localeCompare(b.time)));
+
+    setEditingItemId('');
+    setEditingField(null);
+
+    const result = await groupService.updateItineraryItem(
+      item.id,
+      timeToSubmit,
+      placeIdToSubmit,
+      customPlaceToSubmit,
+      memoToSubmit
+    );
+
+    if (!result.success) {
+      alert(result.message || '일정 저장에 실패했습니다.');
+      const itineraryData = await groupService.getItinerary(groupId!);
+      setItinerary(itineraryData);
     }
   };
 
@@ -443,29 +528,145 @@ const GroupPage: React.FC = () => {
                                           
                                           <Card className="flex-1 hover:border-primary/50 transition-colors bg-background">
                                             <CardContent className="p-4 sm:p-6 relative">
-                                              {canDelete && (
-                                                <Button
-                                                  variant="ghost"
-                                                  size="icon"
-                                                  className="absolute top-2 right-2 h-7 w-7 text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                                                  onClick={() => handleDeleteItinerary(item.id)}
-                                                >
-                                                  <Trash2 className="h-4 w-4" />
-                                                </Button>
-                                              )}
-                                              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-6 mb-2">
-                                                <span className="text-xl font-bold text-primary">{item.time}</span>
-                                                <h4 className="text-lg font-semibold flex items-center gap-2">
-                                                  <MapPin className="h-4 w-4 text-muted-foreground" />
-                                                  {placeName}
-                                                </h4>
+                                              <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                {canDelete && (
+                                                  <Button
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    className="h-7 w-7 text-muted-foreground hover:text-destructive transition-colors cursor-pointer"
+                                                    onClick={() => handleDeleteItinerary(item.id)}
+                                                    title="일정 삭제"
+                                                  >
+                                                    <Trash2 className="h-3.5 w-3.5" />
+                                                  </Button>
+                                                )}
                                               </div>
-                                              {item.memo && (
-                                                <p className="text-sm text-muted-foreground mt-2 bg-muted/50 p-3 rounded-md">
-                                                  {item.memo}
-                                                </p>
+                                              
+                                              <div className="flex flex-col gap-2">
+                                                {/* 시간 편집 분기 */}
+                                                {editingItemId === item.id && editingField === 'time' ? (
+                                                  <div className="flex items-center gap-1.5 inline-block">
+                                                    <Input
+                                                      type="time"
+                                                      value={editItinTime}
+                                                      onChange={(e) => setEditItinTime(e.target.value)}
+                                                      onBlur={() => saveField(item, 'time', editItinTime)}
+                                                      onFocus={(e) => e.target.select()}
+                                                      onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') saveField(item, 'time', editItinTime);
+                                                        if (e.key === 'Escape') { setEditingItemId(''); setEditingField(null); }
+                                                      }}
+                                                      className="w-[100px] h-8 text-sm font-bold text-primary px-1 bg-background"
+                                                      autoFocus
+                                                    />
+                                                    <Button 
+                                                      type="button" 
+                                                      variant="outline" 
+                                                      size="sm"
+                                                      onMouseDown={(e) => {
+                                                        e.preventDefault();
+                                                        setEditItinTime(prev => adjustTimeString(prev, -30));
+                                                      }}
+                                                      className="px-1.5 h-8 text-[10px] cursor-pointer"
+                                                    >
+                                                      -30
+                                                    </Button>
+                                                    <Button 
+                                                      type="button" 
+                                                      variant="outline" 
+                                                      size="sm"
+                                                      onMouseDown={(e) => {
+                                                        e.preventDefault();
+                                                        setEditItinTime(prev => adjustTimeString(prev, 30));
+                                                      }}
+                                                      className="px-1.5 h-8 text-[10px] cursor-pointer"
+                                                    >
+                                                      +30
+                                                    </Button>
+                                                  </div>
+                                                ) : (
+                                                  <span 
+                                                    className="text-xl font-bold text-primary cursor-pointer hover:bg-muted/70 px-1.5 py-0.5 rounded transition-colors w-fit"
+                                                    onClick={() => {
+                                                      setEditingItemId(item.id);
+                                                      setEditingField('time');
+                                                      setEditItinTime(item.time);
+                                                    }}
+                                                    title="시간 클릭하여 바로 수정"
+                                                  >
+                                                    {item.time}
+                                                  </span>
+                                                )}
+
+                                                {/* 할 일 / 장소 편집 분기 */}
+                                                {editingItemId === item.id && editingField === 'place' ? (
+                                                  <Input
+                                                    value={editItinCustomPlace}
+                                                    onChange={(e) => setEditItinCustomPlace(e.target.value)}
+                                                    onBlur={() => saveField(item, 'place', editItinCustomPlace)}
+                                                    onFocus={(e) => e.target.select()}
+                                                    onKeyDown={(e) => {
+                                                      if (e.key === 'Enter') saveField(item, 'place', editItinCustomPlace);
+                                                      if (e.key === 'Escape') { setEditingItemId(''); setEditingField(null); }
+                                                    }}
+                                                    className="flex-1 h-8 text-sm font-semibold bg-background"
+                                                    placeholder="할 일 또는 장소 입력"
+                                                    autoFocus
+                                                  />
+                                                ) : (
+                                                  <h4 
+                                                    className="text-lg font-semibold flex items-center gap-2 cursor-pointer hover:bg-muted/70 px-1.5 py-0.5 rounded transition-colors w-fit"
+                                                    onClick={() => {
+                                                      setEditingItemId(item.id);
+                                                      setEditingField('place');
+                                                      setEditItinCustomPlace(placeName || '');
+                                                    }}
+                                                    title="할 일 또는 장소 클릭하여 바로 수정"
+                                                  >
+                                                    <MapPin className="h-4 w-4 text-muted-foreground" />
+                                                    {placeName}
+                                                  </h4>
+                                                )}
+                                              </div>
+
+                                              {/* 메모 편집 분기 */}
+                                              {editingItemId === item.id && editingField === 'memo' ? (
+                                                <Input
+                                                  value={editItinMemo}
+                                                  onChange={(e) => setEditItinMemo(e.target.value)}
+                                                  onBlur={() => saveField(item, 'memo', editItinMemo)}
+                                                  onFocus={(e) => e.target.select()}
+                                                  onKeyDown={(e) => {
+                                                    if (e.key === 'Enter') saveField(item, 'memo', editItinMemo);
+                                                    if (e.key === 'Escape') { setEditingItemId(''); setEditingField(null); }
+                                                  }}
+                                                  className="w-full h-8 text-xs mt-2 bg-background"
+                                                  placeholder="메모 입력 (비워두면 삭제)..."
+                                                  autoFocus
+                                                />
+                                              ) : (
+                                                <div 
+                                                  onClick={() => {
+                                                    setEditingItemId(item.id);
+                                                    setEditingField('memo');
+                                                    setEditItinMemo(item.memo || '');
+                                                  }}
+                                                  className="cursor-pointer group/memo mt-2"
+                                                  title="메모 클릭하여 바로 수정"
+                                                >
+                                                  {item.memo ? (
+                                                    <p className="text-sm text-muted-foreground bg-muted/50 hover:bg-muted/80 p-3 rounded-md transition-colors">
+                                                      {item.memo}
+                                                    </p>
+                                                  ) : (
+                                                    <p className="text-xs text-muted-foreground/40 italic pl-6 group-hover/memo:text-primary transition-colors">
+                                                      + 메모 추가...
+                                                    </p>
+                                                  )}
+                                                </div>
                                               )}
-                                              <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
+
+                                              <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground border-t pt-2 mt-3">
                                                 <span className="flex items-center gap-1">
                                                   등록: {item.users?.nickname}
                                                 </span>
@@ -484,92 +685,29 @@ const GroupPage: React.FC = () => {
                         </DragDropContext>
                       )}
 
-                      {/* 인라인 추가 폼 또는 버튼 */}
+                      {/* 퀵 일정 추가 버튼 */}
                       <div className="relative pt-4">
                         <div className="absolute w-4 h-4 bg-background border-2 border-muted rounded-full -left-[33px] top-11" />
                         
-                        {showInlineAdd ? (
-                          <Card className="border-primary shadow-sm bg-background">
-                            <CardHeader className="pb-3">
-                              <CardTitle className="text-base">새 일정 추가</CardTitle>
-                            </CardHeader>
-                            <CardContent>
-                              <form onSubmit={handleAddItinerary} className="grid gap-4">
-                                <div className="grid gap-4 sm:grid-cols-2">
-                                  <div className="grid gap-2">
-                                    <Label htmlFor="time">시간</Label>
-                                    <Input
-                                      id="time"
-                                      type="time"
-                                      value={newItinTime}
-                                      onChange={(e) => setNewItinTime(e.target.value)}
-                                      required
-                                    />
-                                  </div>
-                                  <div className="grid gap-2">
-                                    <Label htmlFor="place">장소</Label>
-                                    <select
-                                      id="place"
-                                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                                      value={newItinPlaceId}
-                                      onChange={(e) => setNewItinPlaceId(e.target.value)}
-                                    >
-                                      <option value="custom">직접 입력...</option>
-                                      {places.filter(p => p.is_confirmed).map(p => (
-                                        <option key={p.id} value={p.id}>{p.name}</option>
-                                      ))}
-                                    </select>
-                                    {newItinPlaceId === 'custom' && (
-                                      <Input
-                                        placeholder="장소명 입력"
-                                        value={newItinCustomPlace}
-                                        onChange={(e) => setNewItinCustomPlace(e.target.value)}
-                                        className="mt-2"
-                                        required
-                                      />
-                                    )}
-                                  </div>
-                                </div>
-                                <div className="grid gap-2">
-                                  <Label htmlFor="memo">메모 (선택사항)</Label>
-                                  <Input
-                                    id="memo"
-                                    placeholder="간단한 메모를 남겨주세요."
-                                    value={newItinMemo}
-                                    onChange={(e) => setNewItinMemo(e.target.value)}
-                                  />
-                                </div>
-                                <div className="flex justify-end gap-2 mt-2">
-                                  <Button 
-                                    type="button" 
-                                    variant="ghost" 
-                                    onClick={() => setShowInlineAdd(false)}
-                                  >
-                                    취소
-                                  </Button>
-                                  <Button type="submit" disabled={isAddingItin || !newItinTime}>
-                                    {isAddingItin ? <Loader2 className="h-4 w-4 animate-spin" /> : '저장'}
-                                  </Button>
-                                </div>
-                              </form>
-                            </CardContent>
-                          </Card>
-                        ) : (
-                          <Button 
-                            variant="outline" 
-                            className="w-full h-16 border-dashed text-muted-foreground hover:text-primary hover:border-primary gap-2"
-                            onClick={() => setShowInlineAdd(true)}
-                          >
-                            <PlusCircle className="h-5 w-5" />
-                            새 일정 추가
-                          </Button>
-                        )}
+                        <Button 
+                          variant="outline" 
+                          className="w-full h-16 border-dashed text-muted-foreground hover:text-primary hover:border-primary gap-2 cursor-pointer font-semibold shadow-sm hover:bg-primary/5 transition-all"
+                          onClick={handleQuickAddItinerary}
+                          disabled={isAddingItin}
+                        >
+                          {isAddingItin ? (
+                            <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                          ) : (
+                            <PlusCircle className="h-5 w-5 text-primary" />
+                          )}
+                          새 일정 즉시 추가 (1시간 뒤)
+                        </Button>
                       </div>
                     </div>
                     
-                    {itinerary.length === 0 && !showInlineAdd && (
+                    {itinerary.length === 0 && !isAddingItin && (
                       <p className="text-center py-8 text-muted-foreground text-sm">
-                        아직 등록된 일정이 없습니다. <br/>'+ 새 일정 추가' 버튼을 눌러 첫 번째 일정을 추가해보세요!
+                        아직 등록된 일정이 없습니다. <br/>'+ 새 일정 즉시 추가' 버튼을 눌러 첫 번째 일정을 추가해보세요!
                       </p>
                     )}
                   </div>
