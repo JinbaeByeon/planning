@@ -47,7 +47,7 @@ import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
 import { groupService } from '@/services/groupService';
 import type { TravelGroup, ItineraryItem } from '@/services/groupService';
-import { format, parseISO } from 'date-fns';
+import { format, parseISO, addDays, differenceInDays } from 'date-fns';
 import { ko } from 'date-fns/locale';
 import { cn } from '@/lib/utils';
 const adjustTimeString = (timeStr: string, offsetMinutes: number): string => {
@@ -58,6 +58,52 @@ const adjustTimeString = (timeStr: string, offsetMinutes: number): string => {
   const newH = String(Math.floor(newTotal / 60)).padStart(2, '0');
   const newM = String(newTotal % 60).padStart(2, '0');
   return `${newH}:${newM}`;
+};
+
+const parseConfirmedDate = (dateStr?: string): Date[] => {
+  if (!dateStr) return [new Date()];
+  
+  // 1. 범위 날짜 포맷 (예: "2026-06-01 ~ 2026-06-03")
+  if (dateStr.includes('~')) {
+    const [startPart, endPart] = dateStr.split('~').map(s => s.trim());
+    try {
+      const start = parseISO(startPart);
+      const end = parseISO(endPart);
+      if (!isNaN(start.getTime()) && !isNaN(end.getTime())) {
+        const daysCount = differenceInDays(end, start) + 1;
+        const dates: Date[] = [];
+        for (let i = 0; i < daysCount; i++) {
+          dates.push(addDays(start, i));
+        }
+        return dates;
+      }
+    } catch (e) {
+      console.error("Error parsing range date:", e);
+    }
+  }
+
+  // 2. 한국어 완성형 레거시 포맷 (예: "2026년 06월 01일 (월요일)")
+  const koreanRegex = /(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일/;
+  const match = dateStr.match(koreanRegex);
+  if (match) {
+    const [_, y, m, d] = match;
+    const date = new Date(Number(y), Number(m) - 1, Number(d));
+    if (!isNaN(date.getTime())) {
+      return [date];
+    }
+  }
+
+  // 3. 단일 날짜 포맷 (예: "2026-06-01")
+  try {
+    const singleDate = parseISO(dateStr);
+    if (!isNaN(singleDate.getTime())) {
+      return [singleDate];
+    }
+  } catch (e) {
+    console.error("Error parsing single date:", e);
+  }
+
+  return [new Date()];
 };
 
 const GroupPage: React.FC = () => {
@@ -84,6 +130,7 @@ const GroupPage: React.FC = () => {
 
   // 일정표(Itinerary) 상태
   const [itinerary, setItinerary] = useState<ItineraryItem[]>([]);
+  const [activeDay, setActiveDay] = useState<number>(1);
   const [isAddingItin, setIsAddingItin] = useState(false);
   const [editingItemId, setEditingItemId] = useState<string>('');
   const [editingField, setEditingField] = useState<'time' | 'place' | 'memo' | null>(null);
@@ -101,6 +148,8 @@ const GroupPage: React.FC = () => {
 
   // 최종 확정 컨펌 상태
   const [dateToFinalize, setDateToFinalize] = useState<string | null>(null);
+
+  const confirmedDates = parseConfirmedDate(group?.confirmed_date);
 
   useEffect(() => {
     if (groupId) {
@@ -242,7 +291,7 @@ const GroupPage: React.FC = () => {
 
     setIsAddingItin(true);
     let nextTime = '09:00';
-    const dayItems = itinerary; // 단일 일차 형태이므로 기존 전체 리스트 활용
+    const dayItems = itinerary.filter(item => item.day_number === activeDay);
     if (dayItems.length > 0) {
       const lastItem = dayItems[dayItems.length - 1];
       const [h, m] = lastItem.time.split(':').map(Number);
@@ -259,7 +308,7 @@ const GroupPage: React.FC = () => {
       undefined,
       '새로운 할 일',
       undefined,
-      1
+      activeDay
     );
     setIsAddingItin(false);
 
@@ -359,30 +408,38 @@ const GroupPage: React.FC = () => {
   const handleDragEnd = async (result: DropResult) => {
     if (!result.destination) return;
 
-    const items = Array.from(itinerary);
-    const [reorderedItem] = items.splice(result.source.index, 1);
-    items.splice(result.destination.index, 0, reorderedItem);
+    const dayItems = itinerary.filter(item => item.day_number === activeDay);
+    const otherItems = itinerary.filter(item => item.day_number !== activeDay);
 
-    // 낙관적 UI 업데이트
-    setItinerary(items);
+    const [reorderedItem] = dayItems.splice(result.source.index, 1);
+    dayItems.splice(result.destination.index, 0, reorderedItem);
 
     // 시간 재계산 (간단히 30분 간격으로 재배치하는 예시)
-    if (items.length > 0) {
-      const baseTime = items[0].time; // 첫 번째 항목 시간 기준
+    let updatedDayItems = dayItems;
+    if (dayItems.length > 0) {
+      const baseTime = dayItems[0].time; // 첫 번째 항목 시간 기준
       const [hours, minutes] = baseTime.split(':').map(Number);
       
-      const updatedItems = items.map((item, index) => {
+      updatedDayItems = dayItems.map((item, index) => {
         const totalMinutes = hours * 60 + minutes + (index * 30);
         const newHours = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
         const newMinutes = String(totalMinutes % 60).padStart(2, '0');
         return { ...item, time: `${newHours}:${newMinutes}` };
       });
-      
-      setItinerary(updatedItems);
+    }
 
-      // 서버 반영
+    const merged = [...otherItems, ...updatedDayItems].sort((a, b) => {
+      if (a.day_number !== b.day_number) return a.day_number - b.day_number;
+      return a.time.localeCompare(b.time);
+    });
+
+    // 낙관적 UI 업데이트
+    setItinerary(merged);
+
+    // 서버 반영
+    if (updatedDayItems.length > 0) {
       const res = await groupService.updateItineraryTimes(
-        updatedItems.map(item => ({ id: item.id, time: item.time }))
+        updatedDayItems.map(item => ({ id: item.id, time: item.time }))
       );
       
       if (!res.success) {
@@ -409,6 +466,7 @@ const GroupPage: React.FC = () => {
   }
 
   const isConfirmed = group.status === 'confirmed';
+  const filteredItinerary = itinerary.filter(item => item.day_number === activeDay);
 
   return (
     <div className="min-h-screen bg-muted/30 pb-20">
@@ -490,9 +548,35 @@ const GroupPage: React.FC = () => {
                       <CalendarIcon className="h-5 w-5 text-primary" />
                       타임라인
                     </h3>
+
+                    {/* 일차 선택 서브 탭 (동적 생성) */}
+                    {confirmedDates.length > 1 && (
+                      <div className="flex flex-wrap gap-2 mb-6 bg-muted/40 p-2 rounded-lg border border-muted/50 w-fit">
+                        {confirmedDates.map((date, idx) => {
+                          const dayNum = idx + 1;
+                          const formattedDate = format(date, 'MM/dd');
+                          const isSelected = activeDay === dayNum;
+                          return (
+                            <Button
+                              key={dayNum}
+                              type="button"
+                              variant={isSelected ? 'default' : 'secondary'}
+                              size="sm"
+                              className={cn(
+                                "h-8 px-3 rounded-md font-semibold text-xs transition-all cursor-pointer",
+                                isSelected ? "shadow-sm font-bold bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                              )}
+                              onClick={() => setActiveDay(dayNum)}
+                            >
+                              {dayNum}일차 ({formattedDate})
+                            </Button>
+                          );
+                        })}
+                      </div>
+                    )}
                     
                     <div className="relative border-l-2 border-muted ml-4 pl-6 space-y-8 py-4">
-                      {itinerary.length > 0 && (
+                      {filteredItinerary.length > 0 && (
                         <DragDropContext onDragEnd={handleDragEnd}>
                           <Droppable droppableId="itinerary-list">
                             {(provided) => (
@@ -501,7 +585,7 @@ const GroupPage: React.FC = () => {
                                 {...provided.droppableProps}
                                 ref={provided.innerRef}
                               >
-                                {itinerary.map((item, index) => {
+                                {filteredItinerary.map((item, index) => {
                                   const canDelete = item.user_id === userId || isCreator;
                                   const placeName = item.place_id ? item.group_places?.name : item.custom_place;
 
@@ -705,9 +789,9 @@ const GroupPage: React.FC = () => {
                       </div>
                     </div>
                     
-                    {itinerary.length === 0 && !isAddingItin && (
+                    {filteredItinerary.length === 0 && !isAddingItin && (
                       <p className="text-center py-8 text-muted-foreground text-sm">
-                        아직 등록된 일정이 없습니다. <br/>'+ 새 일정 즉시 추가' 버튼을 눌러 첫 번째 일정을 추가해보세요!
+                        아직 이 날짜에 등록된 일정이 없습니다. <br/>'+ 새 일정 즉시 추가' 버튼을 눌러 첫 번째 일정을 추가해보세요!
                       </p>
                     )}
                   </div>

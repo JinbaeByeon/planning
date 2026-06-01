@@ -429,10 +429,11 @@ export const groupService = {
     time: string, 
     placeId?: string, 
     customPlace?: string, 
-    memo?: string
-  ): Promise<{ success: boolean; message: string }> {
+    memo?: string,
+    dayNumber: number = 1
+  ): Promise<{ success: boolean; data?: ItineraryItem; message: string }> {
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('group_itinerary')
         .insert([{ 
           group_id: groupId, 
@@ -440,14 +441,35 @@ export const groupService = {
           time, 
           place_id: placeId || null, 
           custom_place: customPlace || null, 
-          memo: memo || null 
-        }]);
+          memo: memo || null,
+          day_number: dayNumber
+        }])
+        .select()
+        .single();
 
       if (error) throw error;
-      return { success: true, message: '일정이 추가되었습니다.' };
+      return { success: true, data: data as ItineraryItem, message: '일정이 추가되었습니다.' };
     } catch (error: any) {
       console.error('Error adding itinerary item:', error);
       return { success: false, message: `일정 추가 중 오류가 발생했습니다: ${error.message}` };
+    }
+  },
+
+  /**
+   * 단일 일정 항목의 시간을 업데이트합니다.
+   */
+  async updateItineraryTime(itemId: string, time: string): Promise<{ success: boolean; message: string }> {
+    try {
+      const { error } = await supabase
+        .from('group_itinerary')
+        .update({ time })
+        .eq('id', itemId);
+
+      if (error) throw error;
+      return { success: true, message: '시간이 업데이트되었습니다.' };
+    } catch (error: any) {
+      console.error('Error updating itinerary time:', error);
+      return { success: false, message: `시간 업데이트 중 오류가 발생했습니다: ${error.message}` };
     }
   },
 
@@ -471,6 +493,35 @@ export const groupService = {
     } catch (error) {
       console.error('Error getting itinerary:', error);
       return [];
+    }
+  },
+
+  /**
+   * 세부 일정(Itinerary) 항목을 수정합니다.
+   */
+  async updateItineraryItem(
+    itemId: string,
+    time: string,
+    placeId?: string,
+    customPlace?: string,
+    memo?: string
+  ): Promise<{ success: boolean; message: string }> {
+    try {
+      const { error } = await supabase
+        .from('group_itinerary')
+        .update({ 
+          time,
+          place_id: placeId || null,
+          custom_place: customPlace || null,
+          memo: memo || null
+        })
+        .eq('id', itemId);
+
+      if (error) throw error;
+      return { success: true, message: '일정이 수정되었습니다.' };
+    } catch (error: any) {
+      console.error('Error updating itinerary item:', error);
+      return { success: false, message: `일정 수정 중 오류가 발생했습니다: ${error.message}` };
     }
   },
 
